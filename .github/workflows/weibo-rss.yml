@@ -1,0 +1,74 @@
+name: 发布微博热搜 RSS
+
+on:
+  push:
+    paths:
+      - '.github/workflows/weibo-rss.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: weibo-rss-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 下载榜单并生成 RSS
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.request import urlopen
+          from xml.etree.ElementTree import Element, ElementTree, SubElement
+
+          source = "https://solarhell.github.io/hot-search-crawler/latest.json"
+          with urlopen(source, timeout=20) as response:
+              snapshot = json.load(response)
+
+          board = next(
+              (board for board in snapshot["boards"] if board["platform"] == "weibo"),
+              None,
+          )
+          if not board or not board.get("ok") or not board.get("items"):
+              raise SystemExit("上游没有可用的微博榜单，保留上次发布的 RSS")
+
+          rss = Element("rss", version="2.0")
+          channel = SubElement(rss, "channel")
+          SubElement(channel, "title").text = "微博热搜"
+          SubElement(channel, "link").text = "https://s.weibo.com/top/summary?cate=realtimehot"
+          SubElement(channel, "description").text = "微博热搜榜快照"
+
+          for entry in board["items"]:
+              item = SubElement(channel, "item")
+              SubElement(item, "title").text = entry["title"]
+              SubElement(item, "link").text = entry["url"]
+              SubElement(item, "guid", isPermaLink="true").text = entry["url"]
+              SubElement(item, "description").text = (
+                  f"排名 {entry['rank']}，热度 {entry.get('hot', '暂无')}"
+              )
+
+          Path("_site").mkdir(exist_ok=True)
+          ElementTree(rss).write("_site/weibo.xml", encoding="utf-8", xml_declaration=True)
+          print(f"已生成 {len(board['items'])} 条微博热搜")
+          PY
+
+      - name: 上传 Pages 文件
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: 发布到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
