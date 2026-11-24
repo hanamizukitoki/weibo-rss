@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -18,11 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: 下载榜单并生成 RSS
@@ -68,6 +66,54 @@ jobs:
         uses: actions/upload-pages-artifact@v4
         with:
           path: _site
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 等待 GitHub API 列出发布产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+
+          api = os.environ["GITHUB_API_URL"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run = os.environ["GITHUB_RUN_ID"]
+          request = Request(
+              f"{api}/repos/{repo}/actions/runs/{run}/artifacts?name=github-pages",
+              headers={
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                  "Accept": "application/vnd.github+json",
+              },
+          )
+          for attempt in range(12):
+              try:
+                  with urlopen(request, timeout=10) as response:
+                      artifacts = json.load(response)["artifacts"]
+                  if any(a["name"] == "github-pages" and not a["expired"] for a in artifacts):
+                      print("GitHub API 已列出 github-pages 产物")
+                      break
+              except HTTPError as error:
+                  if error.code not in (429, 500, 502, 503, 504):
+                      raise
+                  print(f"GitHub API 暂时返回 HTTP {error.code}")
+              except (URLError, TimeoutError) as error:
+                  print(f"查询产物暂时失败：{error}")
+              if attempt < 11:
+                  time.sleep(5)
+          else:
+              raise SystemExit("GitHub API 一直未列出本次运行的 github-pages 产物")
+          PY
 
       - name: 发布到 GitHub Pages
         id: deployment
